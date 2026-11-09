@@ -37,9 +37,9 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	// ctx отменится по Ctrl+C или SIGTERM.
-        // Он же корневой контекст для фоновых задач:
-        // при остановке сервера запущенные контейнеры
-        // будут остановлены и удалены.
+	// Он же корневой контекст для фоновых задач:
+	// при остановке сервера запущенные контейнеры
+	// будут остановлены и удалены.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

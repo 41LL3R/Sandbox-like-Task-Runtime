@@ -201,8 +201,8 @@ func (s *Server) execute(id string) {
 	log = log.With("container_id", shortID(containerID))
 
 	// Для уборки требуется взять контекст без отмены
-        // (даже при остановке сервера контейнер нужно
-        // остановить и удалить (FR-10)).
+	// (даже при остановке сервера контейнер нужно
+	// остановить и удалить (FR-10)).
 	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(s.ctx), 30*time.Second)
 	defer cancelCleanup()
 	defer func() {
