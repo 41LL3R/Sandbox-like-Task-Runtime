@@ -1,10 +1,11 @@
-module github.com/your-org/sandboxTaskRuntime
+module github.com/41LL3R/Sandbox-like-Task-Runtime
 
 go 1.25.0
 
 require (
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
