@@ -7,11 +7,11 @@ import (
 
 // BuildScript превращает последовательность шагов в POSIX-shell-скрипт.
 //
-//   #!/bin/sh
-//   set -e
+//	#!/bin/sh
+//	set -e
 //
-//   echo '=== step 1/N: <name>'
-//   <run>
+//	echo '=== step 1/N: <name>'
+//	<run>
 //
 // Флаг `set -e` даёт «ошибка шага → ошибка задачи»:
 // если любая команда внутри шага падает (кроме `if`, `||`, `&&`, `while`),
@@ -39,7 +39,7 @@ func BuildScript(steps []Step) string {
 }
 
 // escapeForSingleQuote экранирует строку для вставки внутрь
-// shell-литерала в одинарных кавычках: ' → '\''.
+// shell-литерала в одинарных кавычках: ' → '\”.
 func escapeForSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", `'\''`)
 }

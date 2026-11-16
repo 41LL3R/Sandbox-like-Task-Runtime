@@ -24,7 +24,7 @@ func (s Status) Final() bool {
 
 // Spec - что нужно запустить.
 type Spec struct {
-        Task           *spec.Task `json:"task,omitempty"`
+	Task           *spec.Task `json:"task,omitempty"`
 	Image          string     `json:"image"`
 	Cmd            []string   `json:"cmd,omitempty"`
 	TimeoutSeconds int        `json:"timeout_seconds,omitempty"`
