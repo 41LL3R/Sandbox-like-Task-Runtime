@@ -12,21 +12,34 @@ import (
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/backend/fake"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/run"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/store"
+	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/worker"
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *store.Memory) {
 	t.Helper()
 	st := store.NewMemory()
 	be := fake.New()
+	
+	// Создаём и запускаем воркер для тестов
+	pool := worker.New(worker.Config{
+		Workers:        1,
+		QueueSize:      10,
+		DefaultTimeout: 5 * time.Second,
+	}, st, be, nil)
+	pool.Start(t.Context())
+
+	// Передаём pool в NewServer (4-м аргументом)
 	srv := NewServer(Config{
 		DefaultImage:   "default:1",
 		DefaultTimeout: 5 * time.Second,
 		MaxTimeout:     time.Hour,
-	}, st, be, nil, t.Context())
+	}, st, be, pool, nil, t.Context())
+	
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
-		srv.Wait()
+		// Контекст t.Context() отменится автоматически в конце теста, 
+		// что остановит воркеры.
 	})
 	return ts, st
 }

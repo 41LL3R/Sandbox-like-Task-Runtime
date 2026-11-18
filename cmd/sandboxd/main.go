@@ -16,6 +16,7 @@ import (
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/api"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/backend/docker"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/store"
+	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/worker"
 )
 
 func main() {
@@ -62,11 +63,21 @@ func main() {
 	}
 
 	st := store.NewMemory()
+
+	// Создаем пул воркеров. Он будет асинхронно запускать контейнеры.
+	pool := worker.New(worker.Config{
+		Workers:        2,
+		QueueSize:      100,
+		DefaultTimeout: *defaultTimeout,
+		CleanupTimeout: 30 * time.Second,
+	}, st, be, log)
+	pool.Start(ctx)
+
 	apiSrv := api.NewServer(api.Config{
 		DefaultImage:   *defaultImage,
 		DefaultTimeout: *defaultTimeout,
 		MaxTimeout:     *maxTimeout,
-	}, st, be, log, ctx)
+	}, st, be, pool, log, ctx)
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -85,7 +96,7 @@ func main() {
 		if !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server failed", "err", err)
 			stop()
-			apiSrv.Wait()
+			pool.Wait()
 			os.Exit(1)
 		}
 	case <-ctx.Done():
@@ -95,6 +106,6 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
-	apiSrv.Wait()
+	pool.Wait() // ждём, пока воркеры остановят контейнеры
 	log.Info("bye")
 }

@@ -23,13 +23,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/backend"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/run"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/spec"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/store"
+	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/worker"
 )
 
 type Config struct {
@@ -45,17 +45,13 @@ type Server struct {
 	cfg     Config
 	store   store.Store
 	backend backend.Backend
+	worker  *worker.Pool
 	log     *slog.Logger
 	newID   func() string
-
-	// ctx - корневой контекст фоновых задач. Отменяется при остановке
-	// сервера; исполнители это видят и останавливают контейнеры.
 	ctx context.Context
-	// wg ждёт завершения всех фоновых execute; нужен для graceful shutdown.
-	wg sync.WaitGroup
 }
 
-func NewServer(cfg Config, st store.Store, be backend.Backend, log *slog.Logger, ctx context.Context) *Server {
+func NewServer(cfg Config, st store.Store, be backend.Backend, w *worker.Pool, log *slog.Logger, ctx context.Context) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -69,16 +65,11 @@ func NewServer(cfg Config, st store.Store, be backend.Backend, log *slog.Logger,
 		cfg:     cfg,
 		store:   st,
 		backend: be,
+		worker:  w,
 		log:     log,
 		newID:   newRunID,
 		ctx:     ctx,
 	}
-}
-
-// Wait блокируется, пока не завершатся все фоновые execute.
-// Вызывать после того, как ctx отменён, иначе он будет ждать вечно.
-func (s *Server) Wait() {
-	s.wg.Wait()
 }
 
 func (s *Server) Handler() http.Handler {
@@ -133,9 +124,19 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save run: "+err.Error())
 		return
 	}
-
-	s.wg.Add(1)
-	go s.execute(rn.ID)
+	
+	if err := s.worker.Submit(rn.ID); err != nil {
+		// Если очередь переполнена, задача не встанет в очередь.
+		// Нужно перевести её в статус failed, чтобы она не висела вечно в queued.
+		s.store.Update(rn.ID, func(r *run.Run) {
+			r.Status = run.StatusFailed
+			r.Error = "run queue is full"
+			now := time.Now()
+			r.FinishedAt = &now
+		})
+		writeError(w, http.StatusServiceUnavailable, "run queue is full, try again later")
+		return
+	}
 
 	s.log.Info("run created",
 		"run_id", rn.ID, "image", rnSpec.Image, "yaml", task != nil)
@@ -229,126 +230,6 @@ func (s *Server) parseYAMLRequest(r *http.Request) (run.Spec, *spec.Task, error)
 		Cmd:            []string{"sh", "-c", spec.BuildScript(task.Steps)},
 		TimeoutSeconds: timeout,
 	}, &task, nil
-}
-
-// execute: запускает контейнер, ждёт завершения,
-// собирает логи, убирает за собой.
-func (s *Server) execute(id string) {
-	defer s.wg.Done()
-
-	log := s.log.With("run_id", id)
-
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Error("panic while executing run", "panic", rec)
-			s.finish(id, nil, fmt.Sprintf("internal error: %v", rec), backend.Logs{})
-		}
-	}()
-
-	r, err := s.store.Update(id, func(r *run.Run) { r.Status = run.StatusRunning })
-	if err != nil {
-		log.Error("run disappeared from store", "err", err)
-		return
-	}
-
-	timeout := s.cfg.DefaultTimeout
-	if r.Spec.TimeoutSeconds > 0 {
-		timeout = time.Duration(r.Spec.TimeoutSeconds) * time.Second
-	}
-
-	log.Info("starting container", "image", r.Spec.Image, "cmd", r.Spec.Cmd)
-	containerID, err := s.backend.Start(s.ctx, backend.Spec{
-		RunID: id,
-		Image: r.Spec.Image,
-		Cmd:   r.Spec.Cmd,
-	})
-	if err != nil {
-		log.Warn("container did not start", "err", err)
-		s.finish(id, nil, err.Error(), backend.Logs{})
-		return
-	}
-	startedAt := time.Now()
-	s.store.Update(id, func(r *run.Run) {
-		r.ContainerID = containerID
-		r.StartedAt = &startedAt
-	})
-	log = log.With("container_id", shortID(containerID))
-
-	// Для уборки требуется взять контекст без отмены
-	// (даже при остановке сервера контейнер нужно
-	// остановить и удалить).
-	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(s.ctx), 30*time.Second)
-	defer cancelCleanup()
-	defer func() {
-		if err := s.backend.Remove(cleanupCtx, containerID); err != nil {
-			log.Error("failed to remove container", "err", err)
-		}
-	}()
-
-	waitCtx, cancelWait := context.WithTimeout(s.ctx, timeout)
-	status, waitErr := s.backend.Wait(waitCtx, containerID)
-	cancelWait()
-
-	var reason string
-	if waitErr != nil {
-		switch {
-		case s.ctx.Err() != nil:
-			reason = "server is shutting down"
-		case errors.Is(waitCtx.Err(), context.DeadlineExceeded):
-			reason = fmt.Sprintf("timeout: task did not finish in %s", timeout)
-		default:
-			reason = waitErr.Error()
-		}
-		log.Warn("stopping container", "reason", reason)
-		if err := s.backend.Stop(cleanupCtx, containerID); err != nil {
-			log.Error("failed to stop container", "err", err)
-		}
-		// После остановки узнаём с каким кодом завершился контейнер.
-		status, waitErr = s.backend.Wait(cleanupCtx, containerID)
-	}
-
-	logs, err := s.backend.Logs(cleanupCtx, containerID)
-	if err != nil {
-		log.Error("failed to read logs", "err", err)
-	}
-
-	var exitCode *int
-	if waitErr == nil {
-		code := status.Code
-		exitCode = &code
-		if reason == "" {
-			switch {
-			case status.OOMKilled:
-				reason = "container was killed: out of memory"
-			case code != 0:
-				reason = fmt.Sprintf("process exited with code %d", code)
-			}
-		}
-	} else if reason == "" {
-		reason = waitErr.Error()
-	}
-
-	s.finish(id, exitCode, reason, logs)
-	log.Info("run finished", "exit_code", status.Code, "error", reason)
-}
-
-// finish переводит запуск в конечный статус
-// (пустой reason вместе с кодом 0 означает успех).
-func (s *Server) finish(id string, exitCode *int, reason string, logs backend.Logs) {
-	now := time.Now()
-	s.store.Update(id, func(r *run.Run) {
-		r.ExitCode = exitCode
-		r.Error = reason
-		r.FinishedAt = &now
-		r.Stdout = logs.Stdout
-		r.Stderr = logs.Stderr
-		r.LogsTruncated = logs.Truncated
-		if reason == "" && exitCode != nil && *exitCode == 0 {
-			r.Status = run.StatusSucceeded
-		} else {
-			r.Status = run.StatusFailed
-		}
-	})
 }
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
@@ -472,9 +353,3 @@ func newRunID() string {
 	return hex.EncodeToString(b)
 }
 
-func shortID(id string) string {
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
-}
