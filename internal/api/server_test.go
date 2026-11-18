@@ -19,7 +19,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Memory) {
 	t.Helper()
 	st := store.NewMemory()
 	be := fake.New()
-	
+
 	// Создаём и запускаем воркер для тестов
 	pool := worker.New(worker.Config{
 		Workers:        1,
@@ -34,11 +34,11 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Memory) {
 		DefaultTimeout: 5 * time.Second,
 		MaxTimeout:     time.Hour,
 	}, st, be, pool, nil, t.Context())
-	
+
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
-		// Контекст t.Context() отменится автоматически в конце теста, 
+		// Контекст t.Context() отменится автоматически в конце теста,
 		// что остановит воркеры.
 	})
 	return ts, st

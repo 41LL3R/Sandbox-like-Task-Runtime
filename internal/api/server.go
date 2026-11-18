@@ -48,7 +48,7 @@ type Server struct {
 	worker  *worker.Pool
 	log     *slog.Logger
 	newID   func() string
-	ctx context.Context
+	ctx     context.Context
 }
 
 func NewServer(cfg Config, st store.Store, be backend.Backend, w *worker.Pool, log *slog.Logger, ctx context.Context) *Server {
@@ -124,7 +124,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "save run: "+err.Error())
 		return
 	}
-	
+
 	if err := s.worker.Submit(rn.ID); err != nil {
 		// Если очередь переполнена, задача не встанет в очередь.
 		// Нужно перевести её в статус failed, чтобы она не висела вечно в queued.
@@ -352,4 +352,3 @@ func newRunID() string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
