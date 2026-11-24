@@ -8,10 +8,31 @@ import "context"
 
 // Spec — параметры контейнера для одного запуска.
 type Spec struct {
-	RunID string
-	Image string
-	// Cmd — команда; если пустая, используется CMD из образа.
-	Cmd []string
+	RunID      string
+	Image      string
+	Cmd        []string
+	Env        []string
+	Labels     map[string]string
+	Resources  Resources
+	InputFiles []InputFile
+	Outputs    OutputsSpec
+}
+
+type Resources struct {
+	CPURequest    float64
+	CPULimit      float64
+	MemoryRequest int64
+	MemoryLimit   int64
+}
+
+type InputFile struct {
+	Path    string
+	Content []byte
+}
+
+type OutputsSpec struct {
+	Values []string
+	Files  []string
 }
 
 // ExitStatus — как завершился контейнер.
@@ -38,4 +59,6 @@ type Backend interface {
 	Stop(ctx context.Context, id string) error
 	// Remove удаляет контейнер. Отсутствующий контейнер — не ошибка.
 	Remove(ctx context.Context, id string) error
+	// GetOutputs возвращает значения переменных окружения и содержимое файлов вывода.
+	GetOutputs(ctx context.Context, id string, spec OutputsSpec) (map[string]string, map[string][]byte, error)
 }

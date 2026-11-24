@@ -21,7 +21,7 @@ import (
 // видно, какой шаг исполняется.
 // Маркеры нужны только для удобства чтения: финальный
 // статус определяется по exit code контейнера, а не по логам.
-func BuildScript(steps []Step) string {
+func BuildScript(steps []Step, outputValues []string) string {
 	var b strings.Builder
 	b.Grow(64 + 32*len(steps))
 	b.WriteString("#!/bin/sh\n")
@@ -34,6 +34,16 @@ func BuildScript(steps []Step) string {
 			b.WriteString("\n")
 		}
 	}
+
+	b.WriteString("\nmkdir -p /tmp/sandbox-outputs\n")
+
+	for _, name := range outputValues {
+		fmt.Fprintf(&b,
+			"printf '%%s' \"${%s-}\" > '/tmp/sandbox-outputs/%s'\n",
+			name, name,
+		)
+	}
+
 	b.WriteString("\nexit 0\n")
 	return b.String()
 }

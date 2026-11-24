@@ -4,10 +4,15 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"path"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -86,22 +91,52 @@ func (b *Backend) Start(ctx context.Context, spec backend.Spec) (string, error) 
 		return "", err
 	}
 
+	labels := map[string]string{
+		LabelManaged: "true",
+		LabelRunID:   spec.RunID,
+	}
+
+	for key, value := range spec.Labels {
+		labels[key] = value
+	}
+
+	env := make([]string, 0, len(spec.Env))
+	env = append(env, spec.Env...)
+
+	hostConfig := &container.HostConfig{}
+
+	if spec.Resources.CPULimit > 0 {
+		hostConfig.NanoCPUs = int64(spec.Resources.CPULimit * 1e9)
+	}
+
+	if spec.Resources.CPURequest > 0 {
+		shares := int64(math.Max(
+			2,
+			math.Min(262144, spec.Resources.CPURequest*1024),
+		))
+		hostConfig.CPUShares = shares
+	}
+
+	if spec.Resources.MemoryLimit > 0 {
+		hostConfig.Memory = spec.Resources.MemoryLimit
+	}
+
+	if spec.Resources.MemoryRequest > 0 {
+		hostConfig.MemoryReservation = spec.Resources.MemoryRequest
+	}
+
 	created, err := b.cli.ContainerCreate(ctx, client.ContainerCreateOptions{
 		Name: "sandbox-" + spec.RunID,
 		Config: &container.Config{
-			Image: spec.Image,
-			Cmd:   spec.Cmd, // nil -> CMD из образа
-			// Без TTY: тогда stdout и stderr приходят раздельно.
-			Tty: false,
-			Labels: map[string]string{
-				LabelManaged: "true",
-				LabelRunID:   spec.RunID,
-			},
+			Image:  spec.Image,
+			Cmd:    spec.Cmd,
+			Env:    env,
+			Tty:    false,
+			Labels: labels,
 		},
-		// Без AutoRemove: иначе контейнер может исчезнуть раньше,
-		// чем мы заберём логи и код возврата. Удаляем сами в Remove.
-		HostConfig: &container.HostConfig{},
+		HostConfig: hostConfig,
 	})
+
 	if err != nil {
 		return "", fmt.Errorf("create container: %w", err)
 	}
@@ -109,6 +144,14 @@ func (b *Backend) Start(ctx context.Context, spec backend.Spec) (string, error) 
 		b.log.Warn("docker warning", "run_id", spec.RunID, "warning", w)
 	}
 
+	for _, file := range spec.InputFiles {
+		if err := b.putFile(ctx, created.ID, file); err != nil {
+			_ = b.Remove(context.WithoutCancel(ctx), created.ID)
+			return "", fmt.Errorf("put input file %q: %w", file.Path, err)
+		}
+	}
+
+	// Затем запускаем контейнер.
 	if _, err := b.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
 		// Например, в образе нет указанной команды. Контейнер уже создан —
 		// убираем его, чтобы не копились мёртвые контейнеры.
@@ -259,4 +302,127 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 		c.truncated = true
 	}
 	return len(p), nil
+}
+
+func (b *Backend) putFile(
+	ctx context.Context,
+	containerID string,
+	file backend.InputFile,
+) error {
+	var buf bytes.Buffer
+
+	tw := tar.NewWriter(&buf)
+
+	header := &tar.Header{
+		Name: path.Base(file.Path),
+		Mode: 0644,
+		Size: int64(len(file.Content)),
+	}
+
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("write tar header: %w", err)
+	}
+
+	if _, err := tw.Write(file.Content); err != nil {
+		return fmt.Errorf("write tar content: %w", err)
+	}
+
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("close tar writer: %w", err)
+	}
+
+	_, err := b.cli.CopyToContainer(
+		ctx,
+		containerID,
+		client.CopyToContainerOptions{
+			DestinationPath: path.Dir(file.Path),
+			Content:         bytes.NewReader(buf.Bytes()),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("copy file to container: %w", err)
+	}
+
+	return nil
+}
+
+func (b *Backend) GetOutputs(
+	ctx context.Context,
+	containerID string,
+	spec backend.OutputsSpec,
+) (map[string]string, map[string][]byte, error) {
+	values := make(map[string]string)
+	files := make(map[string][]byte)
+
+	for _, name := range spec.Values {
+		outputPath := "/tmp/sandbox-outputs/" + name
+
+		data, err := b.getFile(ctx, containerID, outputPath)
+		if err != nil {
+			// Отсутствующее значение считаем пустым.
+			if cerrdefs.IsNotFound(err) {
+				values[name] = ""
+				continue
+			}
+			return nil, nil, fmt.Errorf("read output value %q: %w", name, err)
+		}
+
+		values[name] = string(data)
+	}
+
+	for _, filePath := range spec.Files {
+		data, err := b.getFile(ctx, containerID, filePath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read output file %q: %w", filePath, err)
+		}
+
+		files[filePath] = data
+	}
+
+	return values, files, nil
+}
+
+func (b *Backend) getFile(
+	ctx context.Context,
+	containerID string,
+	filePath string,
+) ([]byte, error) {
+	result, err := b.cli.CopyFromContainer(
+		ctx,
+		containerID,
+		client.CopyFromContainerOptions{
+			SourcePath: filePath,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("copy file from container: %w", err)
+	}
+	defer result.Content.Close()
+
+	tr := tar.NewReader(result.Content)
+
+	for {
+		header, err := tr.Next()
+
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar archive: %w", err)
+		}
+
+		if header.Typeflag != tar.TypeReg &&
+			header.Typeflag != tar.TypeRegA {
+			continue
+		}
+
+		content, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("read output file: %w", err)
+		}
+
+		return content, nil
+	}
+
+	return nil, fmt.Errorf("file %q not found in archive", filePath)
 }

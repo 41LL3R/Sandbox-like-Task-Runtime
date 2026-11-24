@@ -107,7 +107,7 @@ func (p *Pool) execute(ctx context.Context, id string) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Error("panic while executing run", "panic", rec)
-			p.finish(id, nil, fmt.Sprintf("internal error: %v", rec), backend.Logs{})
+			p.finish(id, nil, fmt.Sprintf("internal error: %v", rec), backend.Logs{}, nil, nil)
 		}
 	}()
 
@@ -124,13 +124,18 @@ func (p *Pool) execute(ctx context.Context, id string) {
 
 	log.Info("starting container", "image", r.Spec.Image, "cmd", r.Spec.Cmd)
 	containerID, err := p.backend.Start(ctx, backend.Spec{
-		RunID: id,
-		Image: r.Spec.Image,
-		Cmd:   r.Spec.Cmd,
+		RunID:      id,
+		Image:      r.Spec.Image,
+		Cmd:        r.Spec.Cmd,
+		Env:        r.Spec.Env,
+		Labels:     r.Spec.Labels,
+		Resources:  r.Spec.Resources,
+		InputFiles: r.Spec.InputFiles,
+		Outputs:    r.Spec.Outputs,
 	})
 	if err != nil {
 		log.Warn("container did not start", "err", err)
-		p.finish(id, nil, err.Error(), backend.Logs{})
+		p.finish(id, nil, err.Error(), backend.Logs{}, nil, nil)
 		return
 	}
 	startedAt := time.Now()
@@ -173,6 +178,18 @@ func (p *Pool) execute(ctx context.Context, id string) {
 	}
 
 	logs, err := p.backend.Logs(cleanupCtx, containerID)
+	outputValues, outputFiles, outputErr := p.backend.GetOutputs(
+		cleanupCtx,
+		containerID,
+		r.Spec.Outputs,
+	)
+
+	if outputErr != nil {
+		log.Error("failed to collect outputs", "err", outputErr)
+		if reason == "" {
+			reason = "collect outputs: " + outputErr.Error()
+		}
+	}
 	if err != nil {
 		log.Error("failed to read logs", "err", err)
 	}
@@ -193,13 +210,13 @@ func (p *Pool) execute(ctx context.Context, id string) {
 		reason = waitErr.Error()
 	}
 
-	p.finish(id, exitCode, reason, logs)
+	p.finish(id, exitCode, reason, logs, outputValues, outputFiles)
 	log.Info("run finished", "exit_code", status.Code, "error", reason)
 }
 
 // finish переводит запуск в конечный статус. Пустой reason вместе с
 // кодом 0 означает успех.
-func (p *Pool) finish(id string, exitCode *int, reason string, logs backend.Logs) {
+func (p *Pool) finish(id string, exitCode *int, reason string, logs backend.Logs, outputValues map[string]string, outputFiles map[string][]byte) {
 	now := time.Now()
 	p.store.Update(id, func(r *run.Run) {
 		r.ExitCode = exitCode
@@ -208,6 +225,8 @@ func (p *Pool) finish(id string, exitCode *int, reason string, logs backend.Logs
 		r.Stdout = logs.Stdout
 		r.Stderr = logs.Stderr
 		r.LogsTruncated = logs.Truncated
+		r.OutputValues = outputValues
+		r.OutputFiles = outputFiles
 		if reason == "" && exitCode != nil && *exitCode == 0 {
 			r.Status = run.StatusSucceeded
 		} else {

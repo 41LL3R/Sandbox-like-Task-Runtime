@@ -77,7 +77,7 @@ func TestBuildScript(t *testing.T) {
 		{Name: "one", Run: "echo 1"},
 		{Name: "two", Run: "echo 2"},
 	}
-	s := BuildScript(steps)
+	s := BuildScript(steps, nil)
 	if !strings.HasPrefix(s, "#!/bin/sh\n") {
 		t.Fatal("missing shebang")
 	}
@@ -90,7 +90,7 @@ func TestBuildScript(t *testing.T) {
 }
 
 func TestBuildScriptQuotesNames(t *testing.T) {
-	s := BuildScript([]Step{{Name: "it's", Run: "true"}})
+	s := BuildScript([]Step{{Name: "it's", Run: "true"}}, nil)
 	if !strings.Contains(s, `'\''s`) {
 		t.Fatalf("name was not escaped: %s", s)
 	}

@@ -22,6 +22,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /runs/{id}/outputs", s.getOutputs)
 	return s.logRequests(mux)
 }
 
@@ -225,10 +228,87 @@ func (s *Server) parseYAMLRequest(r *http.Request) (run.Spec, *spec.Task, error)
 			int(s.cfg.MaxTimeout/time.Second))
 	}
 
+	env := make([]string, 0)
+
+	if task.Inputs != nil {
+		for key, value := range task.Inputs.Env {
+			env = append(env, key+"="+value)
+		}
+	}
+
+	sort.Strings(env)
+
+	// Resources
+	var resources backend.Resources
+
+	if task.Resources != nil {
+		if task.Resources.Requests != nil {
+			if task.Resources.Requests.CPU != "" {
+				resources.CPURequest, _ = strconv.ParseFloat(
+					task.Resources.Requests.CPU, 64,
+				)
+			}
+
+			if task.Resources.Requests.Memory != "" {
+				resources.MemoryRequest, _ = spec.ParseMemory(
+					task.Resources.Requests.Memory,
+				)
+			}
+		}
+
+		if task.Resources.Limits != nil {
+			if task.Resources.Limits.CPU != "" {
+				resources.CPULimit, _ = strconv.ParseFloat(
+					task.Resources.Limits.CPU, 64,
+				)
+			}
+
+			if task.Resources.Limits.Memory != "" {
+				resources.MemoryLimit, _ = spec.ParseMemory(
+					task.Resources.Limits.Memory,
+				)
+			}
+		}
+	}
+
+	// Runner labels
+	labels := make(map[string]string)
+
+	if task.Runner != nil {
+		for i, label := range task.Runner.Labels {
+			labels[fmt.Sprintf("sandbox.runner.label.%d", i)] = label
+		}
+	}
+
+	// Input files
+	var inputFiles []backend.InputFile
+
+	if task.Inputs != nil {
+		for _, file := range task.Inputs.Files {
+			inputFiles = append(inputFiles, backend.InputFile{
+				Path:    file.Path,
+				Content: []byte(file.Content),
+			})
+		}
+	}
+
+	// Outputs
+	var outputs backend.OutputsSpec
+
+	if task.Outputs != nil {
+		outputs.Values = task.Outputs.Values
+		outputs.Files = task.Outputs.Files
+	}
+
 	return run.Spec{
 		Image:          image,
-		Cmd:            []string{"sh", "-c", spec.BuildScript(task.Steps)},
+		Cmd:            []string{"sh", "-c", spec.BuildScript(task.Steps, outputs.Values)},
 		TimeoutSeconds: timeout,
+		Env:            env,
+		Labels:         labels,
+		Resources:      resources,
+		InputFiles:     inputFiles,
+		Outputs:        outputs,
 	}, &task, nil
 }
 
@@ -351,4 +431,22 @@ func newRunID() string {
 	b := make([]byte, 6)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func (s *Server) getOutputs(w http.ResponseWriter, r *http.Request) {
+	rn, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+
+	if !rn.Status.Final() {
+		writeError(w, http.StatusConflict, "run is not finished yet")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":     rn.ID,
+		"values": rn.OutputValues,
+		"files":  rn.OutputFiles,
+	})
 }

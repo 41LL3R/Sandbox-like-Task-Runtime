@@ -4,6 +4,7 @@ package run
 import (
 	"time"
 
+	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/backend"
 	"github.com/41LL3R/Sandbox-like-Task-Runtime/internal/spec"
 )
 
@@ -24,10 +25,15 @@ func (s Status) Final() bool {
 
 // Spec - что нужно запустить.
 type Spec struct {
-	Task           *spec.Task `json:"task,omitempty"`
-	Image          string     `json:"image"`
-	Cmd            []string   `json:"cmd,omitempty"`
-	TimeoutSeconds int        `json:"timeout_seconds,omitempty"`
+	Task           *spec.Task          `json:"task,omitempty"`
+	Image          string              `json:"image"`
+	Cmd            []string            `json:"cmd,omitempty"`
+	TimeoutSeconds int                 `json:"timeout_seconds,omitempty"`
+	Env            []string            `json:"env,omitempty"`
+	Labels         map[string]string   `json:"labels,omitempty"`
+	Resources      backend.Resources   `json:"resources,omitempty"`
+	InputFiles     []backend.InputFile `json:"input_files,omitempty"`
+	Outputs        backend.OutputsSpec `json:"outputs,omitempty"`
 }
 
 // Run - один запуск задачи со статусом, кодом возврата и логами.
@@ -53,4 +59,7 @@ type Run struct {
 	Stdout        []byte `json:"-"`
 	Stderr        []byte `json:"-"`
 	LogsTruncated bool   `json:"logs_truncated,omitempty"`
+
+	OutputValues map[string]string `json:"output_values,omitempty"`
+	OutputFiles  map[string][]byte `json:"output_files,omitempty"`
 }

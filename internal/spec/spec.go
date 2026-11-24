@@ -5,9 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+)
+
+// Регулярные выражения.
+var (
+	envNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	labelPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 )
 
 // Лимиты разумности. Защищают от случайных гигантских YAML и
@@ -147,5 +156,129 @@ func Validate(t Task) error {
 	if t.Timeout < 0 {
 		return errors.New(`field "timeout" must not be negative`)
 	}
+	if err := validateTaskOptions(t); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateTaskOptions(t Task) error {
+	if t.Resources != nil {
+		for name, resource := range map[string]*ResourceSpec{
+			"requests": t.Resources.Requests,
+			"limits":   t.Resources.Limits,
+		} {
+			if resource == nil {
+				continue
+			}
+
+			if resource.CPU != "" {
+				value, err := strconv.ParseFloat(resource.CPU, 64)
+				if err != nil || value <= 0 {
+					return fmt.Errorf(
+						`field "resources.%s.cpu" must be a positive number`,
+						name,
+					)
+				}
+			}
+
+			if resource.Memory != "" {
+				if _, err := ParseMemory(resource.Memory); err != nil {
+					return fmt.Errorf(
+						`field "resources.%s.memory": %w`,
+						name,
+						err,
+					)
+				}
+			}
+		}
+	}
+
+	if t.Runner != nil {
+		for i, label := range t.Runner.Labels {
+			if !labelPattern.MatchString(label) {
+				return fmt.Errorf(
+					`field "runner.labels[%d]" contains invalid label`,
+					i,
+				)
+			}
+		}
+	}
+
+	if t.Inputs != nil {
+		for name := range t.Inputs.Env {
+			if !envNamePattern.MatchString(name) {
+				return fmt.Errorf(
+					`field "inputs.env": invalid variable name %q`,
+					name,
+				)
+			}
+		}
+
+		for i, file := range t.Inputs.Files {
+			if !path.IsAbs(file.Path) || path.Clean(file.Path) != file.Path ||
+				file.Path == "/" || strings.Contains(file.Path, "..") {
+				return fmt.Errorf(
+					`field "inputs.files[%d].path" must be a clean absolute path`,
+					i,
+				)
+			}
+		}
+	}
+
+	if t.Outputs != nil {
+		for i, name := range t.Outputs.Values {
+			if !envNamePattern.MatchString(name) {
+				return fmt.Errorf(
+					`field "outputs.values[%d]" is not a valid environment variable name`,
+					i,
+				)
+			}
+		}
+
+		for i, file := range t.Outputs.Files {
+			if !path.IsAbs(file) || path.Clean(file) != file ||
+				file == "/" || strings.Contains(file, "..") {
+				return fmt.Errorf(
+					`field "outputs.files[%d]" must be a clean absolute path`,
+					i,
+				)
+			}
+		}
+	}
+
+	return nil
+}
+
+func ParseMemory(value string) (int64, error) {
+	units := []struct {
+		suffix string
+		factor int64
+	}{
+		{"Ki", 1 << 10},
+		{"Mi", 1 << 20},
+		{"Gi", 1 << 30},
+		{"Ti", 1 << 40},
+		{"K", 1000},
+		{"M", 1000 * 1000},
+		{"G", 1000 * 1000 * 1000},
+	}
+
+	for _, unit := range units {
+		if strings.HasSuffix(value, unit.suffix) {
+			number := strings.TrimSuffix(value, unit.suffix)
+			n, err := strconv.ParseInt(number, 10, 64)
+			if err != nil || n <= 0 || n > (1<<62)/unit.factor {
+				return 0, fmt.Errorf("invalid memory value %q", value)
+			}
+			return n * unit.factor, nil
+		}
+	}
+
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid memory value %q", value)
+	}
+
+	return n, nil
 }

@@ -130,3 +130,11 @@ func (b *Backend) Removed(id string) bool {
 	defer b.mu.Unlock()
 	return b.removed[id]
 }
+
+func (b *Backend) GetOutputs(
+	ctx context.Context,
+	containerID string,
+	outputs backend.OutputsSpec,
+) (map[string]string, map[string][]byte, error) {
+	return nil, nil, nil
+}
